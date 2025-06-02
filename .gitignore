@@ -1,0 +1,9 @@
+#pycache
+__pycache__/
+
+# output files
+outputs/
+
+old/
+theoretical_DM_halo.npz
+utils.py
