@@ -3,7 +3,11 @@ __pycache__/
 
 # output files
 outputs/
+*.out
 
 old/
 theoretical_DM_halo.npz
 utils.py
+scratch.ipynb
+scratch.py
+launch.json

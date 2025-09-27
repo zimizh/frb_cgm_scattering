@@ -2,16 +2,15 @@ import os
 import numpy as np
 import pandas as pd
 import h5py
-import requests
+# import requests
 import scipy
 import gizmo_analysis as gizmo
 import halo_analysis as halo
 import utilities as ut
 from astropy import units as u
 from pathlib import Path
-
-# from functools import cached_property
-from utils import get_box_crossings, rotate
+from nfw_methods import phi_nfw
+from utils import Rodrigues
 
 class sim_halo:
     """
@@ -39,7 +38,7 @@ class sim_halo:
         """
         
         self.sim_name = name
-        home_dir = '/pool001/zimi/analysis/FIRE/'
+        home_dir = '/ceph/submit/data/user/z/zimi/analysis/FIRE/'
 
         if sim_dir is None:
             self.sim_dir = home_dir + name
@@ -54,11 +53,13 @@ class sim_halo:
         # read halo information using gizmo
         # set halo and halo radius
         self.host = halo.io.IO.read_catalogs('redshift', 0, self.sim_dir, species='gas')
-        host_index = self.host['host.index'][0]
-        self.host_radius = self.host['radius'][host_index] * ut.constant.cm_per_kpc
-        self.host_pos = self.host['position'][host_index]
+        self.host_index = self.host['host.index'][0]
+        self.host_radius = self.host['radius'][self.host_index] * u.kpc
+        self.host_mass = self.host['mass.200c'][self.host_index] * u.M_sun
+        self.scale_radius = self.host['scale.radius'][self.host_index] * u.kpc
+        self.host_pos = self.host['position'][self.host_index]
         
-        self.binsize = binsize
+        self.binsize = binsize*u.kpc
         self.n_bins = int(self.host_radius / self.binsize)
 
         self.header = gizmo.io.Read.read_header(self.sim_dir)
@@ -181,48 +182,83 @@ class sim_halo:
                     for spec_name in part:
                         part[spec_name].host[prop_name] = principal_axes[prop_name]
 
-   
        
         for i, file in enumerate(sorted(dir.glob(f"snapshot_600.*.hdf5"))):
             with h5py.File(file, 'r') as part:
+                part.info = self.header
+                part.snapshot = {
+                    'index': 600,
+                    'redshift': 0,
+                    'scalefactor': 1.0,
+                    # 'time': self.header['time'],
+                    'time.lookback': 0,
+                    'time.hubble': None,
+                }
+                
+                # HARD CODED CHANGE FOR EACH HALO
+                #m12f
+                # part.host = {
+                #     'position': np.array([38711.78, 47665.06, 46817.31]),
+                #     'velocity': np.array([-156.13,  162.88,  110.12]),
+                #     'rotation': np.array([[ 0.08447786, -0.05280387,  0.99502525],
+                #                         [-0.83146679,  0.54657421,  0.09959724],
+                #                         [-0.54911426, -0.83574421,  0.00226876]]),
+                #     'axis.ratios': np.array([[0.155538  , 0.17101623, 0.90949266]]),
+                # }
+                
+                #m12b
+                part.host = {
+                    'position': np.array([39257.39045089, 41609.99354669, 39190.05643334]),
+                    'velocity': [],
+                    'acceleration': [],
+                    'rotation': np.array([[ 0.57996381, -0.81105026, -0.07641635],
+                                        [ 0.72333475,  0.55583914, -0.40967022],
+                                        [ 0.37473834,  0.1823193 ,  0.90902742]]),
+                    'axis.ratios': np.array([0.13753059, 0.15669618, 0.87768946])
+                }
+                
+                # part['PartType0'].host = self.host
                 gas = part["PartType0"] 
 
-                # want dist x, y, z relative to galactic center, and oriented s.t. galaxy is face on
-
+                # unrotated x,y,z distances
                 temp_dist = ut.coordinate.get_distances(
                             gas['Coordinates']/self.h,
                             self.host_pos,
-                            self.header['box.length'], #questionable key
-                            self.scalefactor,
+                            part.info['box.length'],
+                            part.snapshot['scalefactor'],
                         )  # [kpc physical]
+
+                # want dist x, y, z relative to galactic center, and oriented s.t. galaxy is face on
+                # get rotation matrix
+                # assign_hosts_rotation(part, species_name='PartType0')
+
                 
                 # align distances with host principal axes
-                assert (
-                    len(self.host['rotation']) > 0
-                ), 'must assign hosts principal axes rotation tensor!'
-                temp_dist = ut.coordinate.get_coordinates_rotated(
-                    temp_dist, self.host['rotation'][host_index]
-                )
+                rot_dist = ut.coordinate.get_coordinates_rotated(
+                    temp_dist, part.host['rotation']
+                )*u.kpc     # [kpc physical]
 
                 #calculate total distance
                 shape_pos = 1
-                dist_tot = np.sqrt(np.sum(temp_dist**2, shape_pos)) * ut.constant.cm_per_kpc
+                dist_tot = np.sqrt(np.sum(rot_dist**2, shape_pos))
 
-                dens = gas['Density']* mass_conversion / length_conversion**3 * (ut.constant.gram_per_sun * ut.constant.kpc_per_cm**3) # convert to [g]/[cm^3]
+                dens = gas['Density']* mass_conversion / length_conversion**3 * u.M_sun/(u.kpc**3) # units: to [M_sun]/[kpc^3]
                 electron_abundance = gas['ElectronAbundance']
                 
                 #calculate number density
-                number_dens = dens[:] * ut.constant.proton_per_sun * ut.constant.sun_massfraction['hydrogen'] / ut.constant.gram_per_sun
-                ne = electron_abundance * number_dens # electron number density, units:cm^-3
+                h_number_dens = dens[:] * ut.constant.proton_per_sun * ut.constant.sun_massfraction['hydrogen'] / u.M_sun # hydrogen number density [H atoms/cm^3]
+                ne = electron_abundance * h_number_dens # electron number density, units:kpc^-3
                 
-                binsize = gas['SmoothingLength']* length_conversion * (np.pi / 3) ** (1 / 3) / 2 * ut.constant.cm_per_kpc
+                binsize = gas['SmoothingLength']* length_conversion * (np.pi / 3) ** (1 / 3) / 2 * u.kpc
 
                 metallicity = gas['Metallicity'][:,0] # metals mass fraction
                 helium_mass_fracs = gas['Metallicity'][:,1] # helium mass fraction
 
-                potential = gas['Potential'][:]/self.scalefactor * (1e5)**2   # convert from km^2/s^2 to cm^2/s^2
-                # # renormalize potential and compare with nfw profile mass potential.
-            
+
+                # potential from data
+                potential = gas['Potential'][:]/self.scalefactor * u.km**2 /(u.s**2)   # convert from km^2/s^2 to cm^2/s^2
+                # potential from nfw0
+                nfw_potential = phi_nfw(dist_tot, self.scale_radius, self.host_mass, self.host_radius)
                 
                 ys_helium = helium_mass_fracs / (4 * (1 - helium_mass_fracs))
                 mus = (1 + 4 * ys_helium) / (1 + ys_helium + electron_abundance)
@@ -235,15 +271,19 @@ class sim_halo:
                     / ut.constant.boltzmann
                 )
                 
-                data = {'dist_tot': dist_tot,       #[cm]
-                        'density': dens,            # [g]/[cm^3]
-                        'electron_abundance': electron_abundance,       # num electron per proton
-                        'n_e': ne,                                      #[num electron]/[cm^3]
-                        'bin_size': binsize,                #[cm]
+                data = {'dist_x': rot_dist[:,0].cgs,
+                        'dist_y': rot_dist[:,1].cgs,
+                        'dist_z': rot_dist[:,2].cgs,
+                        'dist_tot': dist_tot.cgs,       #[cm]
+                        'density': dens.cgs,            # [g]/[cm^3]
+                        'electron_abundance': electron_abundance,       # num electron per proton, unitless
+                        'n_e': ne.cgs,                                      #[num electron]/[cm^3]
+                        'bin_size': binsize.cgs,                #[cm]
                         'temperature': int_energy,          #[K]
                         'metallicity': metallicity,         #linear mass fraction
                         'helium': helium_mass_fracs,
-                        'potential': potential}             #[cm^2]/[s^2]
+                        'potential': potential.cgs ,            #[cm^2]/[s^2]
+                        'nfw_potential': nfw_potential.cgs}
             
                 if cooling:
                     data['cooling_rates'], data['cooling_times'] = cooling_rates[i], cooling_times[i]
@@ -256,6 +296,15 @@ class sim_halo:
         self.gas_data = gas_data
     def get_gas(self):
         return self.gas_data
+
+    def set_shattered(self, shattered_data):
+        self.shattered_gas = shattered_data
+    def get_shattered(self, shattered_data):
+        return self.shattered_gas
+    
+    def set_rotated(self, rotated_data):
+        self.rotated_gas = rotated_data
+
     
     def get_cooling(self, phase = 'Ambient'):
         """
@@ -269,8 +318,8 @@ class sim_halo:
         for file in sorted(dir.glob(f"cooling_600_{phase.lower()}.*.hdf5")):
             with h5py.File(file, 'r') as fh:
             
-                cooling_time_seconds = fh[f'{phase}/time'][()] * fh[f'{phase}/time'].attrs['to_cgs']     # Cooling times in seconds
-                cooling_rate_cgs = fh[f'{phase}/rate'][()] * fh[f'{phase}/rate'].attrs['to_cgs']    # Cooling rate in erg sec^-1 cm^3
+                cooling_time_seconds = fh[f'{phase}/time'][()] #* fh[f'{phase}/time'].attrs['to_cgs']     # Cooling times in seconds
+                cooling_rate_cgs = fh[f'{phase}/rate'][()] #* fh[f'{phase}/rate'].attrs['to_cgs']    # Cooling rate in erg sec^-1 cm^3
 
                 cooling_times.append(cooling_time_seconds)
                 cooling_rates.append(cooling_rate_cgs)
@@ -295,30 +344,33 @@ class sim_halo:
             data = self.gas_data
 
         result = []
+        rad = self.host_radius.cgs
 
         for i, chunk in enumerate(data):
             if 'dist_tot' not in chunk.keys():
                 raise KeyError('data must contain column "dist_tot"')
             
             if region == 'all':
-                mask = (chunk['dist_tot'] <= self.host_radius) 
+                mask = (chunk['dist_tot'] <= rad) 
             elif region == 'cgm':
-                mask = (chunk['dist_tot'] <= self.host_radius) & (chunk['dist_tot'] >= self.host_radius*0.15)
+                mask = (chunk['dist_tot'] <= rad) & (chunk['dist_tot'] >= rad*0.15)
             elif region == 'disk':
-                mask = (chunk['dist_tot'] <= self.host_radius*0.15)
+                mask = (chunk['dist_tot'] <= rad*0.15)
 
             result.append(chunk[mask])
 
             if save:
-                np.save(f"/pool001/zimi/grackle/grackle_data_files/input/halo_mask_{i}", mask)
+                np.save(f'/ceph/submit/data/user/z/zimi/analysis/FIRE/{self.sim_name}/grackle_input/halo_mask_{i}', mask)
 
         return result
 
-    def find_n_c():
+    def cooling_cold_prep():
         return 0
     
+    def find_n_c(self):
+        return 0
 
-    def get_box_crossings(self, ray_location):
+    def get_box_crossings(self, ray_location, gas):
         """
         Given an (x,y) location, finds the intersecting gas particles in z direction
 
@@ -328,46 +380,55 @@ class sim_halo:
             properties of gas contained in halo
         rotation: (theta, phi)
         """
-
+        # if shattered_only:
+        #    gas = self.shattered_gas
+        # else:
+        #     gas = self.gas_data
+        
         ray_location = np.asarray(ray_location)
 
         if not(ray_location.shape == (2,)):
             raise ValueError('location must be (2,) array')
         
-        binsizes = self.hosto_gas['bin_size']
-        max_size = np.max(binsizes)
+        binsizes = gas['bin_size']
+        # max_size = np.max(binsizes)
         
         # calculate distance from particle center to ray location
-        line = self.hosto_gas[['dist_x', 'dist_y']] - ray_location
+        line = gas[['dist_x', 'dist_y']] - ray_location
 
         # particles that are insize a max_size*max_size box outside ray location
         # inside_ind = (line['dist_x'] < max_size and line['dist_y'] < max_size)
 
         dist_sq = line['dist_x']**2+line['dist_y']**2
-        self.hosto_gas['dist_ray_sq'] = dist_sq
+        gas['dist_ray_sq'] = dist_sq
 
         mask = (dist_sq < binsizes**2)
-        gas_intersect = self.hosto_gas[mask]
+        gas_intersect = gas[mask]
 
         return gas_intersect
 
-    def ray_trace(self, ray_location, rotation = (0,0)):
-        
-        coords = self.hosto_gas[['dist_x', 'dist_y', 'dist_z']]
-        theta, phi = rotation[0], rotation[1]
+    def ray_trace_dm(self, ray_location, rotation = (0,0)):
 
-        new_coords = rotate(coords, theta, phi)
-
-        rotated_gas = self.hosto_gas.repalce(['dist_x', 'dist_y', 'dist_z'], new_coords)
-
-        gas_intersect = self.get_box_crossings_z(rotated_gas, ray_location)
+        gas_intersect = self.get_box_crossings(ray_location, self.gas_data)
 
         # get chord length 
         # chord_len should have units of kpc
         chord_len = 2*np.sqrt(gas_intersect['bin_size']**2-gas_intersect['dist_ray_sq'])
-
-        # get DM
-        dm = np.sum(chord_len*gas_intersect['n_e'])* u.kpc/u.cm**-2
-
+        dm = np.sum(chord_len*gas_intersect['n_e'])
+    
         return dm.to(u.pc/u.cm**-2)
+    
+    def ray_trace_scattering(self, ray_location):
+
+        gas_intersect = self.get_box_crossings(ray_location, self.rotated_gas)
+
+        # get chord length 
+        # chord_len should have units of cm
+        chord_len = 2*np.sqrt(gas_intersect['bin_size']**2-gas_intersect['dist_ray_sq'])
+        ratio = chord_len/gas_intersect['bin_size']
+
+        num_intercepted = gas_intersect['num_intercepted'].sum()
+        alpha_sq_tot = (ratio*gas_intersect['alpha_sq']).sum()
+
+        return num_intercepted, alpha_sq_tot
         
