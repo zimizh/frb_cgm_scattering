@@ -9,7 +9,7 @@ import astropy.units as u
 import astropy.cosmology
 import astropy.constants as const
 
-from halo import halo
+from . import halo
 
 import time
 # import cProfile
