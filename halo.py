@@ -2,7 +2,6 @@ import os
 import numpy as np
 import pandas as pd
 import h5py
-# import requests
 import scipy
 import gizmo_analysis as gizmo
 import halo_analysis as halo
@@ -115,7 +114,7 @@ class sim_halo:
                 'density': dens,
                 'electron_abundance': electron_abundance,
                 'n_e': ne,
-                'bin_size': binsize,
+                'smoothing_len': binsize,
                 # 'internal_energy': int_energy,
                 'temperature': temp,
                 'metallicity': metallicity,
@@ -196,26 +195,37 @@ class sim_halo:
                 }
                 
                 # HARD CODED CHANGE FOR EACH HALO
-                #m12f
-                # part.host = {
-                #     'position': np.array([38711.78, 47665.06, 46817.31]),
-                #     'velocity': np.array([-156.13,  162.88,  110.12]),
-                #     'rotation': np.array([[ 0.08447786, -0.05280387,  0.99502525],
-                #                         [-0.83146679,  0.54657421,  0.09959724],
-                #                         [-0.54911426, -0.83574421,  0.00226876]]),
-                #     'axis.ratios': np.array([[0.155538  , 0.17101623, 0.90949266]]),
-                # }
+                # m12f
+                part.host = {
+                    'position': np.array([38711.78, 47665.06, 46817.31]),
+                    'velocity': np.array([-156.13,  162.88,  110.12]),
+                    'rotation': np.array([[ 0.08447786, -0.05280387,  0.99502525],
+                                        [-0.83146679,  0.54657421,  0.09959724],
+                                        [-0.54911426, -0.83574421,  0.00226876]]),
+                    'axis.ratios': np.array([[0.155538  , 0.17101623, 0.90949266]]),
+                }
                 
                 #m12b
-                part.host = {
-                    'position': np.array([39257.39045089, 41609.99354669, 39190.05643334]),
-                    'velocity': [],
-                    'acceleration': [],
-                    'rotation': np.array([[ 0.57996381, -0.81105026, -0.07641635],
-                                        [ 0.72333475,  0.55583914, -0.40967022],
-                                        [ 0.37473834,  0.1823193 ,  0.90902742]]),
-                    'axis.ratios': np.array([0.13753059, 0.15669618, 0.87768946])
-                }
+                # part.host = {
+                #     'position': np.array([39257.39045089, 41609.99354669, 39190.05643334]),
+                #     'velocity': [],
+                #     'acceleration': [],
+                #     'rotation': np.array([[ 0.57996381, -0.81105026, -0.07641635],
+                #                         [ 0.72333475,  0.55583914, -0.40967022],
+                #                         [ 0.37473834,  0.1823193 ,  0.90902742]]),
+                #     'axis.ratios': np.array([0.13753059, 0.15669618, 0.87768946])
+                # }
+
+                #m12z
+                # part.host = {
+                #     'position': np.array([72937.33, 73589.12, 73689.64]),
+                #     'velocity': np.array([ 3.4749103, 74.35693  , 25.895018 ]),
+                #     'acceleration': [],
+                #     'rotation': np.array([[ 0.95412356,  0.2123023 ,  0.21113016],
+                #             [-0.09696471,  0.8862399 , -0.4529644 ],
+                #             [-0.28327733,  0.41171184,  0.8661682 ]]),
+                #     'axis.ratios': np.array([0.36434507, 0.4700129 , 0.775181  ]),
+                # }
                 
                 # part['PartType0'].host = self.host
                 gas = part["PartType0"] 
@@ -254,9 +264,13 @@ class sim_halo:
                 metallicity = gas['Metallicity'][:,0] # metals mass fraction
                 helium_mass_fracs = gas['Metallicity'][:,1] # helium mass fraction
 
+                sfr = gas['StarFormationRate']
 
                 # potential from data
-                potential = gas['Potential'][:]/self.scalefactor * u.km**2 /(u.s**2)   # convert from km^2/s^2 to cm^2/s^2
+                if 'potential' in gas.keys(): 
+                    potential = gas['Potential'][:]/self.scalefactor * u.km**2 /(u.s**2)   # convert from km^2/s^2 to cm^2/s^2
+                else: 
+                    potential  = [-1]*len(dens) * u.km**2 /(u.s**2)             # if no potential information recorded, then return an array of -1
                 # potential from nfw0
                 nfw_potential = phi_nfw(dist_tot, self.scale_radius, self.host_mass, self.host_radius)
                 
@@ -278,10 +292,11 @@ class sim_halo:
                         'density': dens.cgs,            # [g]/[cm^3]
                         'electron_abundance': electron_abundance,       # num electron per proton, unitless
                         'n_e': ne.cgs,                                      #[num electron]/[cm^3]
-                        'bin_size': binsize.cgs,                #[cm]
+                        'smoothing_len': binsize.cgs,                #[cm]
                         'temperature': int_energy,          #[K]
                         'metallicity': metallicity,         #linear mass fraction
                         'helium': helium_mass_fracs,
+                        'star_formation_rate': sfr,  #star formation rate[Msun]/[yr]
                         'potential': potential.cgs ,            #[cm^2]/[s^2]
                         'nfw_potential': nfw_potential.cgs}
             
@@ -390,7 +405,7 @@ class sim_halo:
         if not(ray_location.shape == (2,)):
             raise ValueError('location must be (2,) array')
         
-        binsizes = gas['bin_size']
+        binsizes = gas['smoothing_len']
         # max_size = np.max(binsizes)
         
         # calculate distance from particle center to ray location
@@ -409,26 +424,34 @@ class sim_halo:
 
     def ray_trace_dm(self, ray_location, rotation = (0,0)):
 
-        gas_intersect = self.get_box_crossings(ray_location, self.gas_data)
+        gas_intersect = self.get_box_crossings(ray_location, self.rotated_gas)
 
         # get chord length 
         # chord_len should have units of kpc
-        chord_len = 2*np.sqrt(gas_intersect['bin_size']**2-gas_intersect['dist_ray_sq'])
-        dm = np.sum(chord_len*gas_intersect['n_e'])
+        chord_len = 2*np.sqrt(gas_intersect['smoothing_len']**2-gas_intersect['dist_ray_sq'])
+        dm = np.sum(chord_len*gas_intersect['n_e_final'])
     
-        return dm.to(u.pc/u.cm**-2)
+        return dm
     
     def ray_trace_scattering(self, ray_location):
+        z_l = 0
+        d_l = 3.085678e+27/2 # 500*u.mpc
+        d_s = 3.085678e+27 # 1000*u.mpc
+        d_ls = 3.085678e+27/2  #500*u.mpc
 
         gas_intersect = self.get_box_crossings(ray_location, self.rotated_gas)
 
         # get chord length 
         # chord_len should have units of cm
-        chord_len = 2*np.sqrt(gas_intersect['bin_size']**2-gas_intersect['dist_ray_sq'])
-        ratio = chord_len/gas_intersect['bin_size']
+        chord_len = 2*np.sqrt(gas_intersect['smoothing_len']**2-gas_intersect['dist_ray_sq'])
+        ratio = chord_len/gas_intersect['smoothing_len']
 
-        num_intercepted = gas_intersect['num_intercepted'].sum()
-        alpha_sq_tot = (ratio*gas_intersect['alpha_sq']).sum()
-
-        return num_intercepted, alpha_sq_tot
+        # num_intercepted = gas_intersect['num_intercepted'].sum()
+        # alpha_sq_tot = (ratio*gas_intersect['alpha_sq']).sum()
         
+        N_img = 1 + (2*((1/(1+z_l))*(d_l*d_ls/d_s))**2) * np.sum(ratio*gas_intersect['num_intercepted']*(gas_intersect['delta_m']/gas_intersect['final_size'])**2)
+        
+        # tau = (1+z_l)/(2*const.c.cgs) * (d_l*d_ls/d_s) * (alpha_sq) # seconds
+
+        return N_img #num_intercepted, N_img, alpha_sq_tot
+

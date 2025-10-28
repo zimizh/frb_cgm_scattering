@@ -119,8 +119,6 @@ def infer_eint_for_temperature_tabulated(
 
 # --------------------------------------------------
 
-# the remainder of this file is dedicated to recreating Liang & Remming 2020 fig 2
-
 def calc_rho_metals_eint(chem, ndens_H_cgs, T_kelvin,  metal_mass_frac = 0.03):
     """
     Calculates the mass density, metal density, and (specific) internal energy
@@ -207,7 +205,7 @@ def get_snapshot_nparts(snapshot_path, partnum):
     Returns the number of particles in each file of snapshot
     """
     n_per_file = []
-    for file_of_snapshot in range(8):
+    for file_of_snapshot in range(4):
         fn = os.path.join(
             snapshot_path, f"output/snapdir_600/snapshot_600.{file_of_snapshot}.hdf5"
         )
@@ -301,7 +299,7 @@ def calc_cooling_gizmo(
         fout['Cold/time'][subsel] = cooling_time_s[()]
     
     elif phase == 'ambient':
-        f_e = gas['ElectronAbundance'][subsel]
+        f_e = gas['ElectronbAundance'][subsel]
         mu = 1/((1-frac_He) + frac_He/4 + (1-frac_He)*f_e)
         mbar = mu*mass_hydrogen_cgs           # mean molecular mass
         rho = gas['Density'][subsel] * density_unit     #cgs
@@ -319,8 +317,10 @@ def calc_cooling_gizmo(
         fc['metal_density'][...] = rho * metallicity/chem.density_units
         fc['internal_energy'][...] = u_int / chem.velocity_units**2
         fc.calculate_cooling_time()
+        fc.calculate_cooling_rate()
         cooling_time_s = fc["cooling_time"] * chem.time_units
-        cooling_rate = fc['internal_energy'] / fc['cooling_time'] / fc['density'] * chem.cooling_units
+        # cooling_rate = fc['internal_energy'] / fc['cooling_time'] / fc['density'] * chem.cooling_units
+        cooling_rate = fc["cooling_rate"]
     
         fout = h5py.File(fn_out, 'a')
         print(f"\t writing to {fn_out}")
@@ -347,7 +347,7 @@ def calc_cooling_gizmo(
     
 if __name__ == "__main__":
     # CHANGE THIS
-    snapdir = '/ceph/submit/data/user/z/zimi/analysis/FIRE/m12b_res7100'#sys.argv[1]
+    snapdir = '/ceph/submit/data/user/z/zimi/analysis/FIRE/m12f_res7100'#sys.argv[1]
     nchunks = 1 #int(sys.argv[2]) if len(sys.argv) >= 3 else 5000
     ph = 'cold' # sys.argv[3]
 
